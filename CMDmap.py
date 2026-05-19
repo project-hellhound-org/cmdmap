@@ -511,6 +511,15 @@ _REFLECTED_CMD_WORDS = frozenset({
     'export', 'env', 'set', 'touch', 'stat', 'file', 'read', 'write',
     'test', 'true', 'false', 'exit', 'kill', 'date', 'cal', 'df', 'du',
     'tar', 'zip', 'gzip', 'gunzip', 'base64', 'xxd', 'od', 'strings',
+    # Common web/JSON keys and response words that cause false positives
+    'error', 'message', 'status', 'response', 'invalid', 'success', 'failed',
+    'input', 'command', 'output', 'data', 'result', 'info', 'warning', 'notice',
+    'debug', 'trace', 'exception', 'null', 'true', 'false', 'object', 'array',
+    'string', 'number', 'boolean', 'payload', 'request', 'params', 'target',
+    'action', 'method', 'type', 'version', 'user', 'path', 'file', 'dir',
+    'url', 'host', 'port', 'ip', 'src', 'q', 'query', 'arg', 'exec', 'system',
+    'callback', 'pong', 'stream', 'chat', 'note', 'notes', 'static', 'app',
+    'js', 'css', 'html', 'body', 'header', 'headers', 'cookie', 'cookies',
 })
 
 # Patterns that indicate the match is inside a PHP/app error — NOT real execution
@@ -2407,11 +2416,10 @@ class Verifier:
         if pat.search(baseline_body):
             return False, ""
 
-        m = pat.search(resp_body)
-        if not m:
-            # 1. Check structured success indicators in HTML/JSON body.
-            #    These are explicit app-level messages ("Command executed successfully",
-            #    exit code 0, {"status":"ok"} etc.) — higher confidence than exec_confirm.
+        # 1. Find ALL potential matches in the response
+        matches = list(pat.finditer(resp_body))
+        if not matches:
+            # Check structured success indicators in HTML/JSON body.
             si_found, si_conf, si_snippet = AdaptiveBypass._scan_success_indicators(
                 resp_body, baseline_body)
             if si_found:
@@ -2419,7 +2427,7 @@ class Verifier:
                       f"'{si_snippet}' (no direct output — blind)")
                 return True, ev
 
-            # 2. Fall back to exec_confirm signal patterns (status=ok, job queued…)
+            # 2. Fall back to exec_confirm signal patterns
             exec_conf_pat = AdaptiveBypass._FILTER_HINTS.get("exec_confirm")
             if exec_conf_pat and exec_conf_pat.search(resp_body):
                 if not exec_conf_pat.search(baseline_body):
@@ -2427,36 +2435,35 @@ class Verifier:
                     return True, ev
             return False, ""
 
-        matched_text = m.group().strip()
+        # 2. Filter matches to find a high-quality one (not a common keyword)
+        valid_match = None
+        for m in matches:
+            matched_text = m.group(1).strip() if (m.lastindex or 0) >= 1 else m.group().strip()
+            
+            # Basic context checks for this specific match
+            pos = m.start()
+            ctx_start = max(0, pos - 150)
+            ctx_end   = min(len(resp_body), pos + 150)
+            context   = resp_body[ctx_start:ctx_end]
+            
+            if _EXEC_FP_CONTEXT.search(context): continue
+            
+            pre_ctx = resp_body[max(0, pos-3):pos]
+            if pre_ctx and pre_ctx[-1] == "/": continue
+            
+            if matched_text.lower() in _REFLECTED_CMD_WORDS: continue
+            
+            # Match looks legitimate
+            valid_match = m
+            break
+            
+        if not valid_match:
+            return False, "All matches were common keywords or reflected input — not execution"
+
+        m = valid_match
+        matched_text = m.group(1).strip() if (m.lastindex or 0) >= 1 else m.group().strip()
         pos = m.start()
-
-        ctx_start = max(0, pos - 200)
-        ctx_end   = min(len(resp_body), pos + 200)
-        context   = resp_body[ctx_start:ctx_end]
-
-        if _EXEC_FP_CONTEXT.search(context):
-            return False, f"Match '{matched_text}' found inside PHP error/warning — not execution"
-
-        pre_ctx = resp_body[max(0, pos-3):pos]
-        if pre_ctx and pre_ctx[-1] == "/":
-            return False, f"Match '{matched_text}' immediately follows / — likely a file path"
-
-        if pattern_key == "linux_user":
-            ctx_text = re.sub(r'<[^>]+>', ' ', context)
-            ctx_text = re.sub(r'&[a-z#0-9]+;', ' ', ctx_text)
-            before_match = ctx_text[:ctx_text.lower().find(matched_text.lower())].rstrip()
-            if re.search(r"(?:warning|error|notice|fatal|fopen|fpassthru|include)[:\s(]", ctx_text, re.I):
-                return False, f"Match '{matched_text}' appears in error context"
-            if before_match and before_match[-1] in ("@", "/", "\\"):
-                return False, f"Match '{matched_text}' is part of email/path"
-
-        # Reject if matched word is a known shell command — this means the app
-        # reflected the raw payload string rather than executing it.
-        # 'whoami' in an input field echo ≠ whoami output. Same for 'id', etc.
-        if matched_text.lower() in _REFLECTED_CMD_WORDS:
-            return False, (f"Match '{matched_text}' is a command keyword — "
-                           f"likely reflected input, not command output")
-
+        
         s = max(0, pos - 20)
         e = min(len(resp_body), pos + 60)
         snippet = resp_body[s:e].strip().replace("\n", " ").replace("\r", "")
