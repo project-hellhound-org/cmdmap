@@ -365,14 +365,17 @@ def tprint(*a, **kw):
         print(*a, **kw)
 
 def section(title):
-    w = 72
+    import shutil
+    w = shutil.get_terminal_size((80, 20)).columns
     line = color("─" * w, C.RD)
-    tprint(f"\n  {line}")
-    tprint(f"  {color('  ' + title.upper(), C.W, C.B)}")
-    tprint(f"  {line}")
+    tprint(f"\n{line}")
+    tprint(f"  {color(title.upper(), C.W, C.B)}")
+    tprint(f"{line}")
 
 def rule(char="─", style=C.RD):
-    print(f"  {color(char * 72, style)}")
+    import shutil
+    w = shutil.get_terminal_size((80, 20)).columns
+    print(color(char * w, style))
 
 def progress(cur, tot, w=28):
     pct = cur / tot if tot else 0
@@ -395,21 +398,23 @@ Y88b  d88P 888   "   888 888  .d88P 888   "   888  d8888888888 888
 """
 
 def print_banner():
+    import shutil
+    term_width = shutil.get_terminal_size((80, 20)).columns
+    
     # Style: Industrial Red (Sample 1)
-    for line in BANNER.strip().split("\n"):
-        print(color(line, C.RD, C.B))
+    banner_lines = BANNER.strip("\n").split("\n")
+    max_len = max(len(line.rstrip()) for line in banner_lines)
+    pad = max(0, (term_width - max_len) // 2)
+    for line in banner_lines:
+        print(color(" " * pad + line.rstrip(), C.RD, C.B))
     print()
-    meta = [
-        ("Tool",    "CMDmap — Autonomous Command Injection Detector"),
-        ("Version", "1.0.0  [SPA+PROBE+VERIFIED+PoC+ADAPTIVE+dd/TAB+BLIND-FR+DECODED+BLIND-AWARE]"),
-        ("Engine",  "Hellhound-Spider → Fingerprint → Inject → Verify → PoC"),
-        ("Safety",  "Non-destructive payloads + 4-stage FP elimination + Adaptive bypass"),
-        ("License", "GNU General Public License v3 (GPLv3)"),
-    ]
-    for k, v in meta:
-        print(f"  {color(k + ':', C.R, C.B):<16} {color(v, C.W)}")
+    
+    meta_text = "[ Created by L4ZZ3RJ0D -- @l4zz3rj0d ]"
+    print(color(meta_text.center(term_width), C.R, C.B))
     print()
-    print(color("  ⚠  For authorized security testing only. Use responsibly.", C.R, C.B))
+    
+    warning = "⚠  For authorized security testing only. Use responsibly."
+    print(color(warning.center(term_width), C.R, C.B))
     rule(char="─", style=C.RD)
     print()
 
@@ -7346,7 +7351,12 @@ Spider import mode (Agent 2 crawl JSON — skips built-in crawler):
     # Tier 5 can pre-filter payloads to chars that pass the sanitization filter.
     injector._survived_chars = {}
     all_params = sum(len(ep["params"]) for ep in endpoints)
-    findings = injector.run(endpoints)
+    try:
+        findings = injector.run(endpoints)
+    except KeyboardInterrupt:
+        sys.stdout.write("\n")
+        tprint(f"  {warn('Scan interrupted by user (Ctrl+C). Saving partial results...')}")
+        findings = injector.findings
 
     stats = {
         "endpoints":     len(endpoints),
@@ -7370,4 +7380,9 @@ Spider import mode (Agent 2 crawl JSON — skips built-in crawler):
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.stdout.write("\n")
+        print("  \033[31m[!]\033[0m \033[1mScan interrupted by user.\033[0m")
+        sys.exit(130)
