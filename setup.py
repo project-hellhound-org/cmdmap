@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="cmdmap",
-    version="1.0.0",
+    version="1.0.1",
     description="Autonomous Command Injection Detector (CMDINJ)",
     author="L4ZZ3RJ0D",
     url="https://github.com/project-hellhound/cmdmap",

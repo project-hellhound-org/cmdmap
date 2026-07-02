@@ -7,7 +7,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10+-blue?style=flat-square&logo=python&logoColor=white"/>
-  <img src="https://img.shields.io/badge/version-1.0.0-red?style=flat-square"/>
+  <img src="https://img.shields.io/badge/version-1.0.1-red?style=flat-square"/>
   <img src="https://img.shields.io/badge/engine-Hellhound--Spider-orange?style=flat-square"/>
   <img src="https://img.shields.io/badge/evasion-Adaptive%20Bypass-critical?style=flat-square"/>
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square"/>
@@ -136,6 +136,15 @@ cmdmap https://target.com/ --verbose
 ## Part of Hellhound
 
 CMDmap is the command injection agent in the [Hellhound Pentest Framework](https://github.com/project-hellhound-org/Hellhound-Pentest) and the CyArt VAPT platform.
+
+---
+
+## Changelog
+
+### v1.0.1
+- **Preserved `+` space bypass**: Added custom parameter encoding in GET/POST requests that preserves the literal `+` character, allowing it to bypass percent-encoding blocks and be decoded as space by target backends (e.g. PHP).
+- **Subshell/substitution payloads**: Added space-bypass command substitution payloads (such as `$(sleep${IFS}10)` and `$(sleep+10)`) to default list and Tier 5.
+- **WAF timing bypass logic**: Refactored Tier 2 fast-bail logic so WAF space-filtering blocks do not terminate the entire separator family, allowing space-bypass payloads to execute.
 
 ---
 
