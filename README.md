@@ -2,8 +2,7 @@
   <img src="images/cmdmap.jpeg" alt="CMDmap" width="600"/>
 </p>
 
-<h1 align="center">CMDmap</h1>
-<h3 align="center">Autonomous Command Injection Detector</h3>
+<h1 align="center">Autonomous Command Injection Detector</h1>
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.10+-blue?style=flat-square&logo=python&logoColor=white"/>
