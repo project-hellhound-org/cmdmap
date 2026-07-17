@@ -154,12 +154,6 @@ For authorized security testing only. Licensed under **GPLv3**.
 
 ---
 
-<p align="center">
-  Built by <a href="https://l4zz3rj0d.github.io"><b>L4ZZ3RJ0D</b></a> &nbsp;·&nbsp;
-  <a href="https://github.com/project-hellhound/cmdmap">project-hellhound/cmdmap</a>
-</p>
-
-
 ## Author
 
 <a href="https://l4zz3rj0d.github.io">
